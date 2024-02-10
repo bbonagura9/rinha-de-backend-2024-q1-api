@@ -2,7 +2,6 @@ package routes
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -37,7 +36,6 @@ func PostTrancacoes(db *gorm.DB) func(*gin.Context) {
 		} else if req.Tipo == "c" {
 			cliente.Saldo = cliente.Saldo + int64(req.Valor)
 		}
-		fmt.Println(cliente.Saldo)
 
 		db.Save(&cliente)
 		db.Create(&models.Transacao{

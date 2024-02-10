@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: $DB_USER
       POSTGRES_PASSWORD: $DB_PASSWORD
       POSTGRES_DB: transacoes
-  api:
+  api1: &api
     build:
       context: .
     environment:
@@ -16,14 +16,14 @@ services:
       GIN_MODE: release
     depends_on:
       - postgres
+  api2:
+    <<: *api
+  nginx:
+    image: nginx:1.25.3
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
     ports:
-      - 8080:8080
-  # nginx:
-  #   image: nginx:1.25.3
-  #   volumes:
-  #     - ./nginx/index.html:/var/www/index.html
-  #     - ./nginx/local.conf:/etc/nginx/nginx.conf
-  #   ports:
-  #     - 8080:8080
-  #   depends_on:
-  #     - gotodo-backend
+      - 9999:9999
+    depends_on:
+      - api1
+      - api2
