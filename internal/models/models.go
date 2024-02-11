@@ -1,6 +1,8 @@
 package models
 
 import (
+	"errors"
+
 	"gorm.io/gorm"
 )
 
@@ -8,8 +10,8 @@ type Transacao struct {
 	gorm.Model
 	ID        uint   `gorm:"primaryKey"`
 	Valor     uint64 `gorm:"name:valor"`
-	Tipo      string `gorm:"name:tipo"`
-	Descricao string `gorm:"name:descricao"`
+	Tipo      string `gorm:"name:tipo" gorm:"size:2"`
+	Descricao string `gorm:"name:descricao" gorm:"size:16"`
 	ClienteID uint   `gorm:"name:cliente_id"`
 }
 
@@ -42,7 +44,7 @@ func InitClientes(db *gorm.DB) {
 	}
 	for idx := uint(1); idx <= 5; idx++ {
 		var cliente Cliente
-		if result := db.First(&cliente, idx); result.RowsAffected == 0 {
+		if err := db.First(&cliente, idx).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 			cliente = Cliente{
 				ID:     idx,
 				Limite: limites[idx],

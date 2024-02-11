@@ -1,11 +1,9 @@
 package db
 
 import (
-	"os"
 	"time"
 
 	"gorm.io/driver/postgres"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	"github.com/bbonagura9/rinha-de-backend-2024-q1-api/internal/utils"
@@ -14,23 +12,16 @@ import (
 func ConnectDB() *gorm.DB {
 	var db *gorm.DB
 	var err error
-	var dialector gorm.Dialector
 
-	dbType := os.Getenv("DB_ENGINE")
-
+	time.Sleep(5 * time.Second)
 	remainingTries := 5
 	for remainingTries > 0 {
-		if dbType == "POSTGRES" {
-			dsn := utils.GetEnv("DB_DSN", "")
-			dialector = postgres.Open(dsn)
-		} else {
-			filename := utils.GetEnv("DB_FILE", "todo.db")
-			dialector = sqlite.Open(filename)
-		}
-
-		db, err = gorm.Open(dialector, &gorm.Config{})
+		dsn := utils.GetEnv("DB_DSN", "")
+		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+			PrepareStmt: true,
+		})
 		if err != nil {
-			time.Sleep(3 * time.Second)
+			time.Sleep(5 * time.Second)
 			remainingTries--
 		} else {
 			break
@@ -40,6 +31,10 @@ func ConnectDB() *gorm.DB {
 	if err != nil {
 		panic("Failed to connect to database")
 	}
+
+	sqlDb, err := db.DB()
+	sqlDb.SetMaxIdleConns(5)
+	sqlDb.SetMaxOpenConns(50)
 
 	return db
 }
