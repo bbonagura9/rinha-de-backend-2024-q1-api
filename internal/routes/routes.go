@@ -1,21 +1,33 @@
 package routes
 
 import (
+	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
-
-	"github.com/bbonagura9/rinha-de-backend-2024-q1-api/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/bbonagura9/rinha-de-backend-2024-q1-api/internal/db"
 )
 
-func PostTrancacoes(db *gorm.DB) func(*gin.Context) {
+type PostTransacoesBody struct {
+	Valor     int64
+	Tipo      string
+	Descricao string
+}
+
+func PostTrancacoes(ctx context.Context, pool *pgxpool.Pool, q *db.Queries) func(*gin.Context) {
 	return func(c *gin.Context) {
-		var req models.TransacoesPostBody
+		var req PostTransacoesBody
 		if err := binding.JSON.Bind(c.Request, &req); err != nil {
 			c.AbortWithError(http.StatusUnprocessableEntity, err)
 			return
@@ -37,78 +49,128 @@ func PostTrancacoes(db *gorm.DB) func(*gin.Context) {
 			return
 		}
 
-		id := c.Param("id")
-		var cliente models.Cliente
-		db.Transaction(func(tx *gorm.DB) error {
-			result := tx.
-				Clauses(clause.Locking{Strength: "UPDATE"}).
-				First(&cliente, id)
-			if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return nil
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.AbortWithStatus(http.StatusUnprocessableEntity)
+			return
+		}
+
+		fmt.Printf("%+v\n", pool.Stat())
+		err = pool.AcquireFunc(ctx, func(conn *pgxpool.Conn) error {
+			tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
+			if err != nil {
+				fmt.Println("Failed beginning transaction")
+				c.AbortWithError(http.StatusInternalServerError, err)
+				return err
 			}
+			defer func() {
+				if err != nil {
+					tx.Rollback(ctx)
+				} else {
+					tx.Commit(ctx)
+				}
+			}()
+			qtx := q.WithTx(tx)
+
+			cliente, err := qtx.GetClienteLock(ctx, id)
+			if err != nil {
+				if errors.Is(sql.ErrNoRows, err) {
+					c.AbortWithStatus(http.StatusNotFound)
+				} else {
+					c.AbortWithError(http.StatusInternalServerError, err)
+				}
+				return err
+			}
+
+			saldo := cliente.Saldo.Int64
+			limite := cliente.Limite.Int64
 
 			if req.Tipo == "d" {
-				cliente.Saldo = cliente.Saldo - int64(req.Valor)
-				if cliente.Saldo < -int64(cliente.Limite) {
+				saldo = saldo - int64(req.Valor)
+				if saldo < -limite {
 					c.AbortWithStatus(http.StatusUnprocessableEntity)
-					return nil
+					return err
 				}
 			} else if req.Tipo == "c" {
-				cliente.Saldo = cliente.Saldo + int64(req.Valor)
+				saldo = saldo + int64(req.Valor)
 			}
 
-			tx.Save(&cliente)
-			tx.Create(&models.Transacao{
-				Valor:     req.Valor,
-				Tipo:      req.Tipo,
-				Descricao: req.Descricao,
-				ClienteID: cliente.ID,
-			})
+			err = qtx.UpdateClienteSaldo(
+				ctx,
+				db.UpdateClienteSaldoParams{
+					ID:    id,
+					Saldo: pgtype.Int8{Int64: saldo, Valid: true},
+				})
+			if err != nil {
+				fmt.Println("Failed updating cliente saldo")
+				c.AbortWithStatus(http.StatusInternalServerError)
+				return err
+			}
 
 			c.JSON(http.StatusOK, gin.H{
 				"limite": cliente.Limite,
-				"saldo":  cliente.Saldo,
+				"saldo":  saldo,
 			})
 
 			return nil
 		})
-	}
-}
 
-func GetExtrato(db *gorm.DB) func(*gin.Context) {
-	return func(c *gin.Context) {
-		id := c.Param("id")
-		var cliente models.Cliente
-
-		result := db.First(&cliente, id)
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			c.AbortWithStatus(http.StatusNotFound)
+		if err != nil {
+			fmt.Println("Failed while acquiring db connection from pool")
+			c.AbortWithError(http.StatusInternalServerError, err)
 			return
 		}
 
-		var transacoes []models.Transacao
-		cond := map[string]interface{}{"cliente_id": cliente.ID}
-		if result := db.Limit(10).Order("updated_at desc").Find(&transacoes, cond); result.Error != nil {
+		_, err = q.CreateTransacao(ctx, db.CreateTransacaoParams{
+			Valor:     pgtype.Int8{Int64: req.Valor, Valid: true},
+			Tipo:      pgtype.Text{String: req.Tipo, Valid: true},
+			Descricao: pgtype.Text{String: req.Descricao, Valid: true},
+			ClienteID: pgtype.Int8{Int64: id, Valid: true},
+		})
+
+		if err != nil {
+			fmt.Println("Failed creating transacao")
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+
+		return
+	}
+}
+
+func GetExtrato(ctx context.Context, q *db.Queries) func(*gin.Context) {
+	return func(c *gin.Context) {
+		id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+		if err != nil {
+			c.AbortWithStatus(http.StatusUnprocessableEntity)
+			return
+		}
+
+		transacoes, err := q.GetExtrato(ctx, pgtype.Int8{Int64: id, Valid: true})
+		if err != nil {
 			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
 
 		var resultTransacoes []interface{}
+		var clienteSaldo int64
+		var clienteLimite int64
 		for _, transacao := range transacoes {
 			resultTransacoes = append(resultTransacoes, gin.H{
 				"valor":        transacao.Valor,
 				"tipo":         transacao.Tipo,
-				"descricao":    transacao.Descricao,
-				"realizada_em": transacao.UpdatedAt,
+				"descricao":    strings.Trim(transacao.Descricao.String, " "),
+				"realizada_em": transacao.CreatedAt,
 			})
+			clienteSaldo = transacao.Saldo.Int64
+			clienteLimite = transacao.Limite.Int64
 		}
 
 		response := gin.H{
 			"saldo": gin.H{
-				"total":        cliente.Saldo,
 				"data_extrato": time.Now().Format(time.RFC3339Nano),
-				"limite":       cliente.Limite,
+				"total":        clienteSaldo,
+				"limite":       clienteLimite,
 			},
 			"ultimas_transacoes": resultTransacoes,
 		}
