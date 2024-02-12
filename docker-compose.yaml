@@ -4,15 +4,15 @@ services:
   postgres:
     image: postgres:16.1
     environment:
-      POSTGRES_USER: $DB_USER
-      POSTGRES_PASSWORD: $DB_PASSWORD
+      POSTGRES_USER: transacoes
+      POSTGRES_PASSWORD: transacoes
       POSTGRES_DB: transacoes
   api1: &api
     build:
       context: .
     environment:
       DB_ENGINE: POSTGRES
-      DB_DSN: host=postgres user=$DB_USER password=$DB_PASSWORD sslmode=disable
+      DB_DSN: host=postgres user=transacoes password=transacoes sslmode=disable
       GIN_MODE: release
     depends_on:
       - postgres
