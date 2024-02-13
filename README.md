@@ -6,7 +6,7 @@
 - PostgreSQL 16
 - Go
 - Gin
-- Gorm
+- SQLc
 
 ## Repositório
 
