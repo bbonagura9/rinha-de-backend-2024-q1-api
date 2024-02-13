@@ -22,8 +22,17 @@ WHERE t.cliente_id = $1
 ORDER BY t.created_at DESC
 LIMIT 10;
 
--- name: UpdateClienteSaldo :exec
+-- name: Debit :one
 UPDATE clientes SET
-  saldo = $2
-WHERE id = $1;
+  saldo = saldo - $2
+WHERE id = CASE 
+  WHEN saldo - $2 < -limite THEN -1
+  ELSE $1 END
+RETURNING saldo, limite;
+
+-- name: Credit :one
+UPDATE clientes SET
+  saldo = saldo + $2
+WHERE id = $1
+RETURNING saldo, limite;
 

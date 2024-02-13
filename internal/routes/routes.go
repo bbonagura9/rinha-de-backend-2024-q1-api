@@ -2,7 +2,6 @@ package routes
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -23,6 +21,29 @@ type PostTransacoesBody struct {
 	Valor     int64
 	Tipo      string
 	Descricao string
+}
+
+type CreditDebitRow struct {
+	Saldo  pgtype.Int8
+	Limite pgtype.Int8
+}
+
+// This is ugly, but works
+func creditDebit(ctx context.Context, q *db.Queries, tipo string, id int64, valor pgtype.Int8) (CreditDebitRow, error) {
+	ret := CreditDebitRow{}
+	var retErr error
+	if tipo == "d" {
+		row, err := q.Debit(ctx, db.DebitParams{ID: id, Saldo: valor})
+		ret.Limite = row.Limite
+		ret.Saldo = row.Saldo
+		retErr = err
+	} else if tipo == "c" {
+		row, err := q.Credit(ctx, db.CreditParams{ID: id, Saldo: valor})
+		ret.Limite = row.Limite
+		ret.Saldo = row.Saldo
+		retErr = err
+	}
+	return ret, retErr
 }
 
 func PostTrancacoes(ctx context.Context, pool *pgxpool.Pool, q *db.Queries) func(*gin.Context) {
@@ -57,60 +78,35 @@ func PostTrancacoes(ctx context.Context, pool *pgxpool.Pool, q *db.Queries) func
 
 		fmt.Printf("%+v\n", pool.Stat())
 		err = pool.AcquireFunc(ctx, func(conn *pgxpool.Conn) error {
-			tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
-			if err != nil {
-				fmt.Println("Failed beginning transaction")
+			valor := pgtype.Int8{Int64: req.Valor, Valid: true}
+
+			row, err := creditDebit(ctx, q, req.Tipo, id, valor)
+			if err != nil && err.Error() == "no rows in result set" {
+				c.AbortWithStatus(http.StatusUnprocessableEntity)
+				return nil
+			} else if err != nil {
+				fmt.Println("Error updating cliente saldo")
 				c.AbortWithError(http.StatusInternalServerError, err)
-				return err
-			}
-			defer func() {
-				if err != nil {
-					tx.Rollback(ctx)
-				} else {
-					tx.Commit(ctx)
-				}
-			}()
-			qtx := q.WithTx(tx)
-
-			cliente, err := qtx.GetClienteLock(ctx, id)
-			if err != nil {
-				if errors.Is(sql.ErrNoRows, err) {
-					c.AbortWithStatus(http.StatusNotFound)
-				} else {
-					c.AbortWithError(http.StatusInternalServerError, err)
-				}
-				return err
-			}
-
-			saldo := cliente.Saldo.Int64
-			limite := cliente.Limite.Int64
-
-			if req.Tipo == "d" {
-				saldo = saldo - int64(req.Valor)
-				if saldo < -limite {
-					c.AbortWithStatus(http.StatusUnprocessableEntity)
-					return err
-				}
-			} else if req.Tipo == "c" {
-				saldo = saldo + int64(req.Valor)
-			}
-
-			err = qtx.UpdateClienteSaldo(
-				ctx,
-				db.UpdateClienteSaldoParams{
-					ID:    id,
-					Saldo: pgtype.Int8{Int64: saldo, Valid: true},
-				})
-			if err != nil {
-				fmt.Println("Failed updating cliente saldo")
-				c.AbortWithStatus(http.StatusInternalServerError)
-				return err
+				return nil
 			}
 
 			c.JSON(http.StatusOK, gin.H{
-				"limite": cliente.Limite,
-				"saldo":  saldo,
+				"limite": row.Limite.Int64,
+				"saldo":  row.Saldo.Int64,
 			})
+
+			_, err = q.CreateTransacao(ctx, db.CreateTransacaoParams{
+				Valor:     pgtype.Int8{Int64: req.Valor, Valid: true},
+				Tipo:      pgtype.Text{String: req.Tipo, Valid: true},
+				Descricao: pgtype.Text{String: req.Descricao, Valid: true},
+				ClienteID: pgtype.Int8{Int64: id, Valid: true},
+			})
+
+			if err != nil {
+				fmt.Println("Failed creating transacao")
+				c.AbortWithStatus(http.StatusInternalServerError)
+				return nil
+			}
 
 			return nil
 		})
@@ -118,19 +114,6 @@ func PostTrancacoes(ctx context.Context, pool *pgxpool.Pool, q *db.Queries) func
 		if err != nil {
 			fmt.Println("Failed while acquiring db connection from pool")
 			c.AbortWithError(http.StatusInternalServerError, err)
-			return
-		}
-
-		_, err = q.CreateTransacao(ctx, db.CreateTransacaoParams{
-			Valor:     pgtype.Int8{Int64: req.Valor, Valid: true},
-			Tipo:      pgtype.Text{String: req.Tipo, Valid: true},
-			Descricao: pgtype.Text{String: req.Descricao, Valid: true},
-			ClienteID: pgtype.Int8{Int64: id, Valid: true},
-		})
-
-		if err != nil {
-			fmt.Println("Failed creating transacao")
-			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
 
@@ -153,8 +136,7 @@ func GetExtrato(ctx context.Context, q *db.Queries) func(*gin.Context) {
 		}
 
 		var resultTransacoes []interface{}
-		var clienteSaldo int64
-		var clienteLimite int64
+		var clienteSaldo, clienteLimite int64
 		for _, transacao := range transacoes {
 			resultTransacoes = append(resultTransacoes, gin.H{
 				"valor":        transacao.Valor,
@@ -164,6 +146,17 @@ func GetExtrato(ctx context.Context, q *db.Queries) func(*gin.Context) {
 			})
 			clienteSaldo = transacao.Saldo.Int64
 			clienteLimite = transacao.Limite.Int64
+		}
+
+		// Deals with empty extrato
+		if len(resultTransacoes) == 0 {
+			cliente, err := q.GetCliente(ctx, id)
+			if err != nil {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
+			clienteSaldo = cliente.Saldo.Int64
+			clienteLimite = cliente.Limite.Int64
 		}
 
 		response := gin.H{
