@@ -45,6 +45,56 @@ func (q *Queries) CreateTransacao(ctx context.Context, arg CreateTransacaoParams
 	return i, err
 }
 
+const credit = `-- name: Credit :one
+UPDATE clientes SET
+  saldo = saldo + $2
+WHERE id = $1
+RETURNING saldo, limite
+`
+
+type CreditParams struct {
+	ID    int64
+	Saldo pgtype.Int8
+}
+
+type CreditRow struct {
+	Saldo  pgtype.Int8
+	Limite pgtype.Int8
+}
+
+func (q *Queries) Credit(ctx context.Context, arg CreditParams) (CreditRow, error) {
+	row := q.db.QueryRow(ctx, credit, arg.ID, arg.Saldo)
+	var i CreditRow
+	err := row.Scan(&i.Saldo, &i.Limite)
+	return i, err
+}
+
+const debit = `-- name: Debit :one
+UPDATE clientes SET
+  saldo = saldo - $2
+WHERE id = CASE 
+  WHEN saldo - $2 < -limite THEN -1
+  ELSE $1 END
+RETURNING saldo, limite
+`
+
+type DebitParams struct {
+	ID    int64
+	Saldo pgtype.Int8
+}
+
+type DebitRow struct {
+	Saldo  pgtype.Int8
+	Limite pgtype.Int8
+}
+
+func (q *Queries) Debit(ctx context.Context, arg DebitParams) (DebitRow, error) {
+	row := q.db.QueryRow(ctx, debit, arg.ID, arg.Saldo)
+	var i DebitRow
+	err := row.Scan(&i.Saldo, &i.Limite)
+	return i, err
+}
+
 const getCliente = `-- name: GetCliente :one
 SELECT id, created_at, limite, saldo FROM clientes
 WHERE id = $1 LIMIT 1
@@ -127,35 +177,4 @@ func (q *Queries) GetExtrato(ctx context.Context, clienteID pgtype.Int8) ([]GetE
 		return nil, err
 	}
 	return items, nil
-}
-
-const truncateTransacoes = `-- name: TruncateTransacoes :exec
-DELETE FROM transacoes
-WHERE id IN (
-  SELECT t.id FROM transacoes t
-  WHERE t.cliente_id=$1
-  ORDER BY t.created_at DESC
-  OFFSET 10
-)
-`
-
-func (q *Queries) TruncateTransacoes(ctx context.Context, clienteID pgtype.Int8) error {
-	_, err := q.db.Exec(ctx, truncateTransacoes, clienteID)
-	return err
-}
-
-const updateClienteSaldo = `-- name: UpdateClienteSaldo :exec
-UPDATE clientes SET
-  saldo = $2
-WHERE id = $1
-`
-
-type UpdateClienteSaldoParams struct {
-	ID    int64
-	Saldo pgtype.Int8
-}
-
-func (q *Queries) UpdateClienteSaldo(ctx context.Context, arg UpdateClienteSaldoParams) error {
-	_, err := q.db.Exec(ctx, updateClienteSaldo, arg.ID, arg.Saldo)
-	return err
 }
